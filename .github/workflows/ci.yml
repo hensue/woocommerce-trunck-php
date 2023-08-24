@@ -1,0 +1,90 @@
+name: Run CI
+on:
+    push:
+        branches:
+            - trunk
+            - 'release/**'
+    workflow_dispatch:
+
+defaults:
+    run:
+        shell: bash
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+    test:
+        name: PHP ${{ matrix.php }} WP ${{ matrix.wp }} - ${{ matrix.unittests }}
+        timeout-minutes: 30
+        runs-on: ubuntu-20.04
+        permissions:
+            contents: read
+        continue-on-error: ${{ matrix.wp == 'nightly' }}
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ['7.4', '8.0']
+                wp: ['latest']
+                unittests: ['shard1', 'shard2']
+                include:
+                    - wp: nightly
+                      php: '7.4'
+                      unittests: 'shard1'
+                    - wp: nightly
+                      php: '7.4'
+                      unittests: 'shard2'
+                    - wp: '6.1'
+                      php: 7.4
+                      unittests: 'shard1'
+                    - wp: '6.1'
+                      php: 7.4
+                      unittests: 'shard2'
+        services:
+            database:
+                image: mysql:5.6
+                env:
+                    MYSQL_ROOT_PASSWORD: root
+                ports:
+                    - 3306:3306
+                options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+        steps:
+            - uses: actions/checkout@v3
+
+            - name: Setup WooCommerce Monorepo
+              uses: ./.github/actions/setup-woocommerce-monorepo
+              with:
+                  build-filters: woocommerce
+
+            - name: Tool versions
+              run: |
+                  php --version
+                  composer --version
+
+            - name: Build Admin feature config
+              working-directory: plugins/woocommerce
+              run: pnpm run build:feature-config
+
+            - id: parseMatrix
+              name: Parse Matrix Variables
+              uses: actions/github-script@v6
+              with:
+                  script: |
+                      const parseWPVersion = require( './.github/workflows/scripts/parse-wp-version' );
+                      parseWPVersion( '${{ matrix.wp }}' ).then( ( version ) => {
+                        core.setOutput( 'wpVersion', version );
+                      } );
+
+            - name: Prepare Testing Environment
+              env:
+                  WP_ENV_CORE: ${{ steps.parseMatrix.outputs.wpVersion }}
+                  WP_ENV_PHP_VERSION: ${{ matrix.php }}
+              run: pnpm --filter=woocommerce env:test
+
+            - name: Run Tests
+              env:
+                  WP_ENV_CORE: ${{ steps.parseMatrix.outputs.wpVersion }}
+                  WP_ENV_PHP_VERSION: ${{ matrix.php }}
+              run: pnpm --filter=woocommerce test:unit:env --testsuite ${{ matrix.unittests }}
